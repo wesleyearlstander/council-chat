@@ -1,4 +1,5 @@
 import { ChatHistoryItem } from './ChatHistory';
+import { Agent } from './Agent';
 
 export interface Thread {
   id: string;
@@ -16,4 +17,5 @@ export interface Project {
   updatedAt: number;
   threads: Thread[];
   activeThreadId?: string;
+  agents: Agent[];
 } 

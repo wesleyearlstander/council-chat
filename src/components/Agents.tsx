@@ -1,37 +1,41 @@
-import React, { useState, useEffect } from 'react';
-import { Agent, AgentMemory } from '../types/Agent';
+import React, { useEffect, useState } from 'react';
+import { Agent } from '../types/Agent';
+import { Project } from '../types/Project';
 import GenerateAgents from './GenerateAgents';
 
-const Agents: React.FC = () => {
-  const [agents, setAgents] = useState<Agent[]>([]);
+interface AgentsProps {
+  project: Project;
+  onUpdateProject: (updatedProject: Project) => void;
+}
+
+const Agents: React.FC<AgentsProps> = ({ project, onUpdateProject }) => {
   const [isMemoryEnabled, setIsMemoryEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem('memory_enabled');
     return saved ? JSON.parse(saved) : true;
   });
 
   useEffect(() => {
+    if (!project.agents) {
+      const updatedProject = {
+        ...project,
+        agents: [],
+        updatedAt: Date.now()
+      };
+      onUpdateProject(updatedProject);
+    }
+  }, [project.id]);
+
+  useEffect(() => {
     localStorage.setItem('memory_enabled', JSON.stringify(isMemoryEnabled));
   }, [isMemoryEnabled]);
 
-  useEffect(() => {
-    const savedAgents = localStorage.getItem('agents');
-    if (savedAgents) {
-      const parsedAgents = JSON.parse(savedAgents);
-      const validatedAgents = parsedAgents.map((agent: Agent) => ({
-        ...agent,
-        memories: agent.memories || []
-      }));
-      setAgents(validatedAgents);
-    }
-  }, []);
-
   const saveAgents = (updatedAgents: Agent[]) => {
-    const validatedAgents = updatedAgents.map(agent => ({
-      ...agent,
-      memories: agent.memories || []
-    }));
-    localStorage.setItem('agents', JSON.stringify(validatedAgents));
-    setAgents(validatedAgents);
+    const updatedProject = {
+      ...project,
+      agents: updatedAgents,
+      updatedAt: Date.now()
+    };
+    onUpdateProject(updatedProject);
   };
 
   const addAgent = () => {
@@ -41,23 +45,23 @@ const Agents: React.FC = () => {
       systemPrompt: '',
       memories: [],
     };
-    saveAgents([...agents, newAgent]);
+    saveAgents([...(project.agents || []), newAgent]);
   };
 
   const updateAgent = (id: string, updates: Partial<Agent>) => {
-    const updatedAgents = agents.map(agent =>
+    const updatedAgents = (project.agents || []).map(agent =>
       agent.id === id ? { ...agent, ...updates } : agent
     );
     saveAgents(updatedAgents);
   };
 
   const deleteAgent = (id: string) => {
-    const updatedAgents = agents.filter(agent => agent.id !== id);
+    const updatedAgents = (project.agents || []).filter(agent => agent.id !== id);
     saveAgents(updatedAgents);
   };
 
   const clearMemories = (agentId: string) => {
-    const updatedAgents = agents.map(agent =>
+    const updatedAgents = (project.agents || []).map(agent =>
       agent.id === agentId ? { ...agent, memories: [] } : agent
     );
     saveAgents(updatedAgents);
@@ -71,8 +75,12 @@ const Agents: React.FC = () => {
   };
 
   const handleAgentsGenerated = (newAgents: Agent[]) => {
-    saveAgents([...agents, ...newAgents]);
+    saveAgents([...(project.agents || []), ...newAgents]);
   };
+
+  if (!project) {
+    return <div>Loading...</div>;
+  }
 
   return (
     <div className="agents-content">
@@ -98,7 +106,7 @@ const Agents: React.FC = () => {
       <GenerateAgents onAgentsGenerated={handleAgentsGenerated} />
       
       <div className="agents-list">
-        {agents.map(agent => (
+        {(project.agents || []).map(agent => (
           <div key={agent.id} className="agent-card">
             <div className="agent-header">
               <input

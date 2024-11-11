@@ -1,7 +1,8 @@
 import confetti from 'canvas-confetti';
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import './App.css';
 import Agents from './components/Agents';
+import ChatInput from './components/ChatInput';
 import { ChatContainer, ChatMessage } from './components/ChatMessage';
 import ProjectSidebar from './components/ProjectSidebar';
 import Responses from './components/Responses';
@@ -9,7 +10,6 @@ import Settings from './components/Settings';
 import { Agent, AgentMemory, AgentResponse } from './types/Agent';
 import { ChatHistoryItem } from './types/ChatHistory';
 import { Project, Thread } from './types/Project';
-import ChatInput from './components/ChatInput';
 
 type Tab = 'chat' | 'agents' | 'settings' | 'responses';
 
@@ -41,6 +41,8 @@ function App() {
   const [thinkingAgents, setThinkingAgents] = useState<string[]>([]);
   const [activeThread, setActiveThread] = useState<Thread | null>(null);
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
+  const [autoPlayCount, setAutoPlayCount] = useState<number>(0);
+  const [autoPlayExecuted, setAutoPlayExecuted] = useState<number>(0);
 
   useEffect(() => {
     localStorage.setItem('projects', JSON.stringify(projects));
@@ -201,63 +203,131 @@ function App() {
     }
   };
 
-  const processWinningResponses = (validResponses: AgentResponse[]) => {
+  // Update the triageResponses function
+  const triageResponses = async (responses: AgentResponse[], apiKey: string): Promise<AgentResponse> => {
+    try {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'gpt-3.5-turbo', // Using smaller model for triage
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a triage expert. Select the response that provides the most valuable information. Focus on: relevance, insight depth, and actionable content.'
+            },
+            {
+              role: 'user',
+              content: `Select the ONE response that provides the most important information:
+
+${responses.map((r, i) => `[${i + 1}]
+Agent: ${r.agentName}
+Response: ${r.speech}`).join('\n\n')}
+
+Respond with ONLY the agent name, like: "AgentName"`
+            }
+          ],
+          temperature: 0.3, // Lower temperature for more consistent selection
+          max_tokens: 50, // Limit response length since we only need the name
+        }),
+      });
+
+      const data = await response.json();
+      const selectedAgentName = data.choices[0].message.content.trim();
+      
+      // Find and return the selected response
+      const selectedResponse = responses.find(r => r.agentName === selectedAgentName);
+      if (!selectedResponse) {
+        console.warn('Selected agent not found, using first response');
+        return responses[0];
+      }
+
+      return selectedResponse;
+    } catch (error) {
+      console.error('Triage error:', error);
+      // If triage fails, fall back to the first response
+      return responses[0];
+    }
+  };
+
+  // Update the processWinningResponses function
+  const processWinningResponses = async (validResponses: AgentResponse[]) => {
     if (validResponses.length === 0) return;
 
     // Find the highest priority
     const highestPriority = Math.max(...validResponses.map(r => r.priority));
     
-    // Get the fastest response with the highest priority
-    const winningResponse = validResponses
+    // Get all responses with the highest priority
+    const highestPriorityResponses = validResponses
       .filter(response => response.priority === highestPriority)
-      .sort((a, b) => a.timestamp - b.timestamp)[0];
+      .sort((a, b) => a.timestamp - b.timestamp);
 
-    // Add winning response to chat messages
-    const agentMessage: ChatMessage = {
-      id: Date.now().toString() + winningResponse.agentId,
-      text: winningResponse.speech,
-      sender: 'agent',
-      agentName: `${winningResponse.agentName} (Priority: ${winningResponse.priority})`,
-      timestamp: winningResponse.timestamp,
-    };
-    setChatMessages(prev => [...prev, agentMessage]);
+    try {
+      // If multiple responses have the same priority, use triage
+      let winningResponse: AgentResponse;
+      if (highestPriorityResponses.length > 1) {
+        const apiKey = localStorage.getItem('openai_api_key');
+        if (!apiKey) throw new Error('API key not found');
+        
+        console.log(`Triaging ${highestPriorityResponses.length} responses with priority ${highestPriority}`);
+        winningResponse = await triageResponses(highestPriorityResponses, apiKey);
+      } else {
+        winningResponse = highestPriorityResponses[0];
+      }
 
-    // Add to chat history
-    const historyItem: ChatHistoryItem = {
-      role: 'assistant',
-      content: winningResponse.speech,
-      agentName: winningResponse.agentName,
-      thinking: winningResponse.thinking,
-      priority: winningResponse.priority,
-      timestamp: winningResponse.timestamp
-    };
-    setChatHistory(prev => [...prev, historyItem]);
+      // Add winning response to chat messages
+      const agentMessage: ChatMessage = {
+        id: Date.now().toString() + winningResponse.agentId,
+        text: winningResponse.speech,
+        sender: 'agent',
+        agentName: `${winningResponse.agentName} (Priority: ${winningResponse.priority})`,
+        timestamp: winningResponse.timestamp,
+      };
+      setChatMessages(prev => [...prev, agentMessage]);
 
-    // Store all responses in the responses tab
-    setResponses(prev => [...validResponses, ...prev]);
+      // Add to chat history - keep only last 10 items
+      const historyItem: ChatHistoryItem = {
+        role: 'assistant',
+        content: winningResponse.speech,
+        agentName: winningResponse.agentName,
+        thinking: winningResponse.thinking,
+        priority: winningResponse.priority,
+        timestamp: winningResponse.timestamp
+      };
+      setChatHistory(prev => [...prev, historyItem].slice(-10));
 
-    // Log the winner
-    console.log(`${winningResponse.agentName} won with priority ${highestPriority}`);
+      // Store all responses in the responses tab
+      setResponses(prev => [...validResponses, ...prev]);
+
+      // Log the winner and triage result
+      console.log(`${winningResponse.agentName} won with priority ${highestPriority}`);
+    } catch (error) {
+      console.error('Error processing winning responses:', error);
+    }
   };
 
   const handleNext = async () => {
+    if (!activeProject) {
+      alert('Please select a project first.');
+      return;
+    }
+
     const apiKey = localStorage.getItem('openai_api_key');
     if (!apiKey) {
       alert('Please set your OpenAI API key in settings first.');
       return;
     }
 
-    // Get all agents from localStorage
-    const savedAgents = localStorage.getItem('agents');
-    const agents = savedAgents ? JSON.parse(savedAgents) : [];
-
-    if (agents.length === 0) {
-      console.warn('No agents configured. Please add agents first.');
+    if (activeProject.agents.length === 0) {
+      alert('Please add agents to the project first.');
       return;
     }
 
     const messageId = Date.now().toString();
-    const validResponses = await processAgentResponses(agents, apiKey, messageId);
+    const validResponses = await processAgentResponses(activeProject.agents, apiKey, messageId);
     setCurrentResponses(validResponses);
 
     if (validResponses.length > 0) {
@@ -266,7 +336,7 @@ function App() {
   };
 
   const handleSendMessage = async (message: string) => {
-    if (!message.trim()) return;
+    if (!message.trim() || !activeThread || !activeProject) return;
 
     const apiKey = localStorage.getItem('openai_api_key');
     if (!apiKey) {
@@ -275,33 +345,56 @@ function App() {
     }
 
     const messageId = Date.now().toString();
+    const timestamp = Date.now();
 
-    // Add user message to chat and history
+    // Create user message objects
     const userMessage: ChatMessage = {
-      id: Date.now().toString(),
+      id: messageId,
       text: message,
       sender: 'user',
-      timestamp: Date.now(),
+      timestamp,
     };
-    setChatMessages(prev => [...prev, userMessage]);
-    
+
     const userHistoryItem: ChatHistoryItem = {
       role: 'user',
       content: message,
-      timestamp: Date.now()
+      timestamp
     };
-    setChatHistory(prev => [...prev, userHistoryItem]);
 
-    // Get all agents from localStorage
-    const savedAgents = localStorage.getItem('agents');
-    const agents = savedAgents ? JSON.parse(savedAgents) : [];
+    // Update chat messages and history
+    setChatMessages(prev => [...prev, userMessage]);
+    const updatedHistory = [...chatHistory, userHistoryItem].slice(-10);
+    setChatHistory(updatedHistory);
 
-    // Process initial responses
-    const validResponses = await processAgentResponses(agents, apiKey, messageId);
+    // Update thread with new chat history
+    const updatedThread = {
+      ...activeThread,
+      chatHistory: updatedHistory,
+      updatedAt: timestamp
+    };
+
+    // Update project with modified thread
+    const updatedProject = {
+      ...activeProject,
+      threads: activeProject.threads.map(t =>
+        t.id === activeThread.id ? updatedThread : t
+      ),
+      updatedAt: timestamp
+    };
+
+    // Update states and localStorage
+    setActiveThread(updatedThread);
+    setProjects(prev => prev.map(p =>
+      p.id === activeProject.id ? updatedProject : p
+    ));
+    setActiveProject(updatedProject);
+
+    // Process agent responses with project's agents
+    const validResponses = await processAgentResponses(activeProject.agents, apiKey, messageId);
     setCurrentResponses(validResponses);
 
     if (validResponses.length > 0) {
-      processWinningResponses(validResponses);
+      await processWinningResponses(validResponses);
     }
   };
 
@@ -311,10 +404,12 @@ function App() {
       name,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      threads: []
+      threads: [],
+      agents: [],
     };
     setProjects(prev => [...prev, newProject]);
     setActiveProject(newProject);
+    setActiveTab('agents');
   };
 
   const handleSelectProject = (project: Project) => {
@@ -365,26 +460,28 @@ function App() {
       name,
       createdAt: timestamp,
       updatedAt: timestamp,
-      chatHistory: [topicMessage] // Only include the topic message
+      chatHistory: [topicMessage]
     };
 
-    const updatedProject = {
-      ...activeProject,
-      threads: [...(activeProject.threads || []), newThread],
-      activeThreadId: newThread.id
-    };
-
-    // Reset all conversation states
-    setResponses([]); // Clear previous responses
-    setCurrentResponses([]); // Clear current responses
-    setNextIndex(0); // Reset next index
-    setChatHistory([topicMessage]); // Only include topic message
+    // Reset all states before updating with new thread
+    setResponses([]);
+    setCurrentResponses([]);
+    setNextIndex(0);
+    setChatHistory([topicMessage]);
     setChatMessages([{
       id: timestamp.toString(),
       text: `Topic: ${name}`,
       sender: 'user',
       timestamp
     }]);
+    setIsAutoPlaying(false);
+    setAutoPlayExecuted(0);
+
+    const updatedProject = {
+      ...activeProject,
+      threads: [...(activeProject.threads || []), newThread],
+      activeThreadId: newThread.id
+    };
 
     // Update project and thread states
     setProjects(prev => prev.map(p => 
@@ -420,13 +517,15 @@ function App() {
     setResponses([]);
     setCurrentResponses([]);
     setNextIndex(0);
+    setIsAutoPlaying(false);
+    setAutoPlayExecuted(0);
     
     // Set the new thread
     setActiveThread(thread);
     
     // Load the thread's chat history
     const threadHistory = thread.chatHistory || [];
-    setChatHistory(threadHistory);
+    setChatHistory([...threadHistory]); // Create a new array to ensure state update
     
     // Convert thread's chat history to chat messages
     const messages: ChatMessage[] = threadHistory.map(historyItem => ({
@@ -436,12 +535,15 @@ function App() {
       agentName: historyItem.agentName,
       timestamp: historyItem.timestamp
     }));
-    setChatMessages(messages);
+    setChatMessages([...messages]); // Create a new array to ensure state update
     
     // Update project's active thread
     const updatedProject = {
       ...activeProject,
-      activeThreadId: thread.id
+      activeThreadId: thread.id,
+      threads: activeProject.threads.map(t => 
+        t.id === thread.id ? { ...thread, chatHistory: threadHistory } : t
+      )
     };
     
     setProjects(prev => prev.map(p => 
@@ -506,45 +608,56 @@ function App() {
   };
 
   useEffect(() => {
-    let autoPlayTimeout: NodeJS.Timeout;
+    let timeoutId: NodeJS.Timeout | null = null;
     
     const runAutoPlay = async () => {
-      if (isAutoPlaying && !isProcessing && currentResponses.length > nextIndex) {
-        try {
-          await handleNext();
-        } catch (error) {
-          console.error('Error in auto-play:', error);
-          setIsAutoPlaying(false);
-        }
-      } else if (nextIndex >= currentResponses.length) {
+      if (!isAutoPlaying || isProcessing) return;
+
+      // Check if we've reached the count limit
+      if (autoPlayCount > 0 && autoPlayExecuted >= autoPlayCount) {
         setIsAutoPlaying(false);
+        setAutoPlayExecuted(0);
+        return;
+      }
+
+      try {
+        await handleNext();
+        if (autoPlayCount > 0) {
+          setAutoPlayExecuted(prev => prev + 1);
+        }
+      } catch (error) {
+        console.error('Error in auto-play:', error);
+        setIsAutoPlaying(false);
+        setAutoPlayExecuted(0);
       }
     };
 
-    if (isAutoPlaying) {
-      autoPlayTimeout = setTimeout(runAutoPlay, 1000);
+    // Only set timeout if auto-play is active
+    if (isAutoPlaying && !isProcessing) {
+      timeoutId = setTimeout(runAutoPlay, 1000);
     }
 
+    // Cleanup function
     return () => {
-      if (autoPlayTimeout) {
-        clearTimeout(autoPlayTimeout);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
       }
     };
-  }, [isAutoPlaying, isProcessing, nextIndex, currentResponses.length]);
+  }, [isAutoPlaying, isProcessing, autoPlayCount, autoPlayExecuted, nextIndex]);
 
   // Update the handleAutoPlayToggle function
   const handleAutoPlayToggle = () => {
     if (isAutoPlaying) {
-      // Immediately stop auto-play
+      // Force immediate stop
       setIsAutoPlaying(false);
+      setAutoPlayExecuted(0);
+      setNextIndex(prev => prev); // Force update to stop current execution
     } else {
-      // Start auto-play only if there are responses to process
-      if (currentResponses.length > nextIndex) {
-        setIsAutoPlaying(true);
-      } else {
-        // If no responses, trigger a new response
+      // Start auto-play
+      setAutoPlayExecuted(0);
+      setIsAutoPlaying(true);
+      if (currentResponses.length <= nextIndex) {
         handleNext();
-        setIsAutoPlaying(true);
       }
     }
   };
@@ -564,6 +677,12 @@ function App() {
       setActiveTab('agents');
     }
   }, [activeThread]);
+
+  // Add the counter handler
+  const handleAutoPlayCountChange = (count: number) => {
+    setAutoPlayCount(count);
+    setAutoPlayExecuted(0);
+  };
 
   return (
     <div className="App">
@@ -641,12 +760,23 @@ function App() {
                 currentResponsesCount={currentResponses.length}
                 nextIndex={nextIndex}
                 onAutoPlayToggle={handleAutoPlayToggle}
+                autoPlayCount={autoPlayCount}
+                onAutoPlayCountChange={handleAutoPlayCountChange}
+                remainingPlays={autoPlayCount === -1 ? -1 : autoPlayCount - autoPlayExecuted}
               />
             </>
           )}
-          {activeTab === 'agents' && (
+          {activeTab === 'agents' && activeProject && (
             <div className="agents-container">
-              <Agents />
+              <Agents 
+                project={activeProject}
+                onUpdateProject={(updatedProject) => {
+                  setProjects(prev => prev.map(p => 
+                    p.id === updatedProject.id ? updatedProject : p
+                  ));
+                  setActiveProject(updatedProject);
+                }}
+              />
             </div>
           )}
           {activeTab === 'responses' && activeThread && (
