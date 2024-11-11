@@ -1,14 +1,15 @@
+import confetti from 'canvas-confetti';
 import React, { useEffect, useState } from 'react';
 import './App.css';
 import Agents from './components/Agents';
-import ChatMessage from './components/ChatMessage';
+import { ChatContainer, ChatMessage } from './components/ChatMessage';
 import ProjectSidebar from './components/ProjectSidebar';
 import Responses from './components/Responses';
 import Settings from './components/Settings';
 import { Agent, AgentMemory, AgentResponse } from './types/Agent';
 import { ChatHistoryItem } from './types/ChatHistory';
 import { Project, Thread } from './types/Project';
-import confetti from 'canvas-confetti';
+import ChatInput from './components/ChatInput';
 
 type Tab = 'chat' | 'agents' | 'settings' | 'responses';
 
@@ -77,17 +78,19 @@ function App() {
       const newResponses = await Promise.all(agents.map(async (agent: Agent, index: number) => {
         const agentHistory = formatHistoryForAgent(agent.name);
         
-        // Ensure agent has memories array and safely construct memories context
-        const memories = agent.memories || [];
-        const memoriesContext = memories.length > 0
-          ? "\n\nYour memories:\n" + memories.map(m => `- ${m.content}`).join('\n')
+        // Check if memory is enabled
+        const isMemoryEnabled = localStorage.getItem('memory_enabled') === 'true';
+        
+        // Only include memories context if enabled
+        const memoriesContext = isMemoryEnabled && agent.memories?.length > 0
+          ? "\n\nYour memories:\n" + agent.memories.map(m => `- ${m.content}`).join('\n')
           : '';
 
         // Log the complete context for this agent
         console.log(`Context for ${agent.name}:`, {
           systemPrompt: agent.systemPrompt + memoriesContext,
           conversationHistory: agentHistory,
-          memories: memories
+          memories: agent.memories
         });
 
         try {
@@ -102,12 +105,13 @@ function App() {
               messages: [
                 { 
                   role: 'system', 
-                  content: agent.systemPrompt + memoriesContext + "\n\nYou can store important information in your memory using the 'remember' field in your response. This is optional." 
+                  content: agent.systemPrompt + memoriesContext + 
+                    (isMemoryEnabled ? "\n\nYou can store important information in your memory using the 'remember' field in your response. This is optional." : "")
                 },
                 ...agentHistory,
                 { 
                   role: 'user', 
-                  content: `Based on the conversation history above, what would you like to contribute now?\n\nRespond in the following JSON format:\n{\n  "thinking": "your internal thought process",\n  "priority": <number between 1-100>,\n  "speech": "what you want to say",\n  "remember": "(optional) something you want to remember for future conversations"\n}\n\nEnsure your response is valid JSON and contains all required fields.` 
+                  content: `Based on the conversation history above, what would you like to contribute now?\n\nRespond in the following JSON format:\n{\n  "thinking": "your internal thought process",\n  "priority": <number between 1-100>,\n  "speech": "what you want to say"${isMemoryEnabled ? ',\n  "remember": "(optional) something you want to remember for future conversations"' : ''}\n}\n\nEnsure your response is valid JSON and contains all required fields.`
                 }
               ],
               temperature: 0.7,
@@ -127,7 +131,7 @@ function App() {
             context: {
               systemPrompt: agent.systemPrompt + memoriesContext,
               conversationHistory: agentHistory,
-              memories: memories
+              memories: agent.memories
             },
             response: rawResponse
           });
@@ -158,7 +162,8 @@ function App() {
               messageId: messageId
             };
 
-            if (parsedResponse.remember) {
+            // Only process memory if enabled
+            if (isMemoryEnabled && parsedResponse.remember) {
               const newMemory: AgentMemory = {
                 id: Date.now().toString(),
                 content: parsedResponse.remember,
@@ -196,6 +201,45 @@ function App() {
     }
   };
 
+  const processWinningResponses = (validResponses: AgentResponse[]) => {
+    if (validResponses.length === 0) return;
+
+    // Find the highest priority
+    const highestPriority = Math.max(...validResponses.map(r => r.priority));
+    
+    // Get the fastest response with the highest priority
+    const winningResponse = validResponses
+      .filter(response => response.priority === highestPriority)
+      .sort((a, b) => a.timestamp - b.timestamp)[0];
+
+    // Add winning response to chat messages
+    const agentMessage: ChatMessage = {
+      id: Date.now().toString() + winningResponse.agentId,
+      text: winningResponse.speech,
+      sender: 'agent',
+      agentName: `${winningResponse.agentName} (Priority: ${winningResponse.priority})`,
+      timestamp: winningResponse.timestamp,
+    };
+    setChatMessages(prev => [...prev, agentMessage]);
+
+    // Add to chat history
+    const historyItem: ChatHistoryItem = {
+      role: 'assistant',
+      content: winningResponse.speech,
+      agentName: winningResponse.agentName,
+      thinking: winningResponse.thinking,
+      priority: winningResponse.priority,
+      timestamp: winningResponse.timestamp
+    };
+    setChatHistory(prev => [...prev, historyItem]);
+
+    // Store all responses in the responses tab
+    setResponses(prev => [...validResponses, ...prev]);
+
+    // Log the winner
+    console.log(`${winningResponse.agentName} won with priority ${highestPriority}`);
+  };
+
   const handleNext = async () => {
     const apiKey = localStorage.getItem('openai_api_key');
     if (!apiKey) {
@@ -217,45 +261,12 @@ function App() {
     setCurrentResponses(validResponses);
 
     if (validResponses.length > 0) {
-      // Find the response with the highest priority
-      const highestPriorityResponse = validResponses.reduce((prev, current) => {
-        return (prev.priority > current.priority) ? prev : current;
-      }, validResponses[0]);
-
-      // Add winning response to chat messages
-      const agentMessage: ChatMessage = {
-        id: Date.now().toString() + highestPriorityResponse.agentId,
-        text: highestPriorityResponse.speech,
-        sender: 'agent',
-        agentName: `${highestPriorityResponse.agentName} (Priority: ${highestPriorityResponse.priority})`,
-        timestamp: Date.now(),
-      };
-      setChatMessages(prev => [...prev, agentMessage]);
-
-      // Add winning response to chat history
-      const historyItem: ChatHistoryItem = {
-        role: 'assistant',
-        content: highestPriorityResponse.speech,
-        agentName: highestPriorityResponse.agentName,
-        thinking: highestPriorityResponse.thinking,
-        priority: highestPriorityResponse.priority,
-        timestamp: Date.now()
-      };
-      setChatHistory(prev => [...prev, historyItem]);
-
-      // Store all responses in the responses tab
-      setResponses(prev => [...validResponses, ...prev]);
-
-      console.log(`${highestPriorityResponse.agentName} won with priority ${highestPriorityResponse.priority}`);
+      processWinningResponses(validResponses);
     }
   };
 
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const currentMessage = message.trim();
-    if (!currentMessage) return;
-    
-    setMessage(''); // Clear input immediately
+  const handleSendMessage = async (message: string) => {
+    if (!message.trim()) return;
 
     const apiKey = localStorage.getItem('openai_api_key');
     if (!apiKey) {
@@ -290,39 +301,8 @@ function App() {
     setCurrentResponses(validResponses);
 
     if (validResponses.length > 0) {
-      // Find the response with the highest priority
-      const highestPriorityResponse = validResponses.reduce((prev, current) => {
-        return (prev.priority > current.priority) ? prev : current;
-      }, validResponses[0]);
-
-      // Add winning response to chat messages
-      const agentMessage: ChatMessage = {
-        id: Date.now().toString() + highestPriorityResponse.agentId,
-        text: highestPriorityResponse.speech,
-        sender: 'agent',
-        agentName: `${highestPriorityResponse.agentName} (Priority: ${highestPriorityResponse.priority})`,
-        timestamp: Date.now(),
-      };
-      setChatMessages(prev => [...prev, agentMessage]);
-
-      // Add winning response to chat history
-      const historyItem: ChatHistoryItem = {
-        role: 'assistant',
-        content: highestPriorityResponse.speech,
-        agentName: highestPriorityResponse.agentName,
-        thinking: highestPriorityResponse.thinking,
-        priority: highestPriorityResponse.priority,
-        timestamp: Date.now()
-      };
-      setChatHistory(prev => [...prev, historyItem]);
-
-      // Store all responses in the responses tab
-      setResponses(prev => [...validResponses, ...prev]);
-
-      console.log(`${highestPriorityResponse.agentName} won with priority ${highestPriorityResponse.priority}`);
+      processWinningResponses(validResponses);
     }
-
-    setMessage('');
   };
 
   const handleCreateProject = (name: string) => {
@@ -340,14 +320,22 @@ function App() {
   const handleSelectProject = (project: Project) => {
     setActiveProject(project);
     
+    // Reset all conversation states first
+    setResponses([]);
+    setCurrentResponses([]);
+    setNextIndex(0);
+    setChatHistory([]);
+    setChatMessages([]);
+    
     // Load active thread if it exists
     if (project.activeThreadId) {
       const activeThread = project.threads.find(t => t.id === project.activeThreadId);
       if (activeThread) {
         setActiveThread(activeThread);
-        setChatHistory(activeThread.chatHistory);
+        const threadHistory = activeThread.chatHistory || [];
+        setChatHistory(threadHistory);
         // Convert chat history to chat messages
-        const messages: ChatMessage[] = activeThread.chatHistory.map(historyItem => ({
+        const messages: ChatMessage[] = threadHistory.map(historyItem => ({
           id: `${historyItem.timestamp}-${Math.random()}`,
           text: historyItem.content,
           sender: historyItem.role === 'user' ? 'user' : 'agent',
@@ -358,8 +346,6 @@ function App() {
       }
     } else {
       setActiveThread(null);
-      setChatHistory([]);
-      setChatMessages([]);
     }
   };
 
@@ -373,12 +359,13 @@ function App() {
       timestamp
     };
 
+    // Create new thread with only the topic message
     const newThread: Thread = {
       id: timestamp.toString(),
       name,
       createdAt: timestamp,
       updatedAt: timestamp,
-      chatHistory: [topicMessage]
+      chatHistory: [topicMessage] // Only include the topic message
     };
 
     const updatedProject = {
@@ -387,12 +374,11 @@ function App() {
       activeThreadId: newThread.id
     };
 
-    setProjects(prev => prev.map(p => 
-      p.id === activeProject.id ? updatedProject : p
-    ));
-    setActiveProject(updatedProject);
-    setActiveThread(newThread);
-    setChatHistory([topicMessage]);
+    // Reset all conversation states
+    setResponses([]); // Clear previous responses
+    setCurrentResponses([]); // Clear current responses
+    setNextIndex(0); // Reset next index
+    setChatHistory([topicMessage]); // Only include topic message
     setChatMessages([{
       id: timestamp.toString(),
       text: `Topic: ${name}`,
@@ -400,10 +386,17 @@ function App() {
       timestamp
     }]);
 
+    // Update project and thread states
+    setProjects(prev => prev.map(p => 
+      p.id === activeProject.id ? updatedProject : p
+    ));
+    setActiveProject(updatedProject);
+    setActiveThread(newThread);
+
     // Switch to chat tab
     setActiveTab('chat');
 
-    // Try to trigger confetti, fallback gracefully if module not loaded
+    // Trigger confetti
     try {
       if (typeof confetti === 'function') {
         confetti({
@@ -423,11 +416,20 @@ function App() {
   const handleSelectThread = (thread: Thread) => {
     if (!activeProject) return;
 
-    setActiveThread(thread);
-    setChatHistory(thread.chatHistory);
+    // Reset all conversation states first
+    setResponses([]);
+    setCurrentResponses([]);
+    setNextIndex(0);
     
-    // Convert chat history to chat messages
-    const messages: ChatMessage[] = thread.chatHistory.map(historyItem => ({
+    // Set the new thread
+    setActiveThread(thread);
+    
+    // Load the thread's chat history
+    const threadHistory = thread.chatHistory || [];
+    setChatHistory(threadHistory);
+    
+    // Convert thread's chat history to chat messages
+    const messages: ChatMessage[] = threadHistory.map(historyItem => ({
       id: `${historyItem.timestamp}-${Math.random()}`,
       text: historyItem.content,
       sender: historyItem.role === 'user' ? 'user' : 'agent',
@@ -436,6 +438,7 @@ function App() {
     }));
     setChatMessages(messages);
     
+    // Update project's active thread
     const updatedProject = {
       ...activeProject,
       activeThreadId: thread.id
@@ -469,13 +472,15 @@ function App() {
   };
 
   useEffect(() => {
-    if (activeProject && activeThread) {
+    if (activeProject && activeThread && chatHistory.length > 0) {
+      // Update the thread with new chat history
       const updatedThread = {
         ...activeThread,
-        chatHistory,
+        chatHistory: chatHistory,
         updatedAt: Date.now()
       };
 
+      // Update the project with the modified thread
       const updatedProject = {
         ...activeProject,
         threads: activeProject.threads.map(t =>
@@ -484,13 +489,17 @@ function App() {
         updatedAt: Date.now()
       };
 
+      // Update both states and localStorage
       setProjects(prev => prev.map(p =>
         p.id === activeProject.id ? updatedProject : p
       ));
       setActiveProject(updatedProject);
       setActiveThread(updatedThread);
+      localStorage.setItem('projects', JSON.stringify(
+        projects.map(p => p.id === activeProject.id ? updatedProject : p)
+      ));
     }
-  }, [chatHistory, chatMessages]);
+  }, [chatHistory]);
 
   const handleSettingsClick = () => {
     setActiveTab('settings');
@@ -499,10 +508,21 @@ function App() {
   useEffect(() => {
     let autoPlayTimeout: NodeJS.Timeout;
     
-    if (isAutoPlaying && !isProcessing) {
-      autoPlayTimeout = setTimeout(() => {
-        handleNext();
-      }, 1000); // Wait 1 second between responses
+    const runAutoPlay = async () => {
+      if (isAutoPlaying && !isProcessing && currentResponses.length > nextIndex) {
+        try {
+          await handleNext();
+        } catch (error) {
+          console.error('Error in auto-play:', error);
+          setIsAutoPlaying(false);
+        }
+      } else if (nextIndex >= currentResponses.length) {
+        setIsAutoPlaying(false);
+      }
+    };
+
+    if (isAutoPlaying) {
+      autoPlayTimeout = setTimeout(runAutoPlay, 1000);
     }
 
     return () => {
@@ -510,7 +530,24 @@ function App() {
         clearTimeout(autoPlayTimeout);
       }
     };
-  }, [isAutoPlaying, isProcessing, chatHistory]);
+  }, [isAutoPlaying, isProcessing, nextIndex, currentResponses.length]);
+
+  // Update the handleAutoPlayToggle function
+  const handleAutoPlayToggle = () => {
+    if (isAutoPlaying) {
+      // Immediately stop auto-play
+      setIsAutoPlaying(false);
+    } else {
+      // Start auto-play only if there are responses to process
+      if (currentResponses.length > nextIndex) {
+        setIsAutoPlaying(true);
+      } else {
+        // If no responses, trigger a new response
+        handleNext();
+        setIsAutoPlaying(true);
+      }
+    }
+  };
 
   // Add this effect to handle tab changes when thread status changes
   useEffect(() => {
@@ -527,22 +564,6 @@ function App() {
       setActiveTab('agents');
     }
   }, [activeThread]);
-
-  // Add this to show the welcome animation in chat
-  const ChatContainer = () => {
-    return (
-      <div className="chat-container">
-        <div className="chat-messages">
-          <div className="welcome-animation">
-            <h2>Topic: {activeThread?.name}</h2>
-          </div>
-          {chatMessages.map(msg => (
-            <ChatMessage key={msg.id} message={msg} />
-          ))}
-        </div>
-      </div>
-    );
-  };
 
   return (
     <div className="App">
@@ -584,7 +605,45 @@ function App() {
         </div>
 
         <div className="content-area">
-          {activeTab === 'chat' && activeThread && <ChatContainer />}
+          {activeTab === 'chat' && activeThread && (
+            <>
+              <ChatContainer>
+                <div className="chat-messages">
+                  <div className="welcome-animation">
+                    <h2>Topic: {activeThread?.name}</h2>
+                  </div>
+                  {chatMessages.map((msg, index) => (
+                    <ChatMessage 
+                      key={msg.id} 
+                      message={msg} 
+                      isLatest={index === chatMessages.length - 1}
+                    />
+                  ))}
+                </div>
+              </ChatContainer>
+              
+              {thinkingAgents.length > 0 && (
+                <div className="thinking-status-bar">
+                  {thinkingAgents.map(agentName => (
+                    <div key={agentName} className="thinking-agent">
+                      <span className="thinking-dot-animation" />
+                      {agentName} is thinking...
+                    </div>
+                  ))}
+                </div>
+              )}
+              
+              <ChatInput
+                onSendMessage={handleSendMessage}
+                onNext={handleNext}
+                isProcessing={isProcessing}
+                isAutoPlaying={isAutoPlaying}
+                currentResponsesCount={currentResponses.length}
+                nextIndex={nextIndex}
+                onAutoPlayToggle={handleAutoPlayToggle}
+              />
+            </>
+          )}
           {activeTab === 'agents' && (
             <div className="agents-container">
               <Agents />
@@ -601,54 +660,6 @@ function App() {
             </div>
           )}
         </div>
-
-        {activeTab === 'chat' && activeThread && (
-          <>
-            {thinkingAgents.length > 0 && (
-              <div className="thinking-status-bar">
-                {thinkingAgents.map(agentName => (
-                  <div key={agentName} className="thinking-agent">
-                    <span className="thinking-dot-animation" />
-                    {agentName} is thinking...
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="chat-controls">
-              <button
-                className={`auto-play-button ${isAutoPlaying ? 'active' : ''}`}
-                onClick={() => setIsAutoPlaying(!isAutoPlaying)}
-              >
-                {isAutoPlaying ? '⏹️ Stop Auto-play' : '▶️ Auto-play'}
-              </button>
-              <form className="chat-input-form" onSubmit={handleSendMessage}>
-                <input
-                  type="text"
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  placeholder="Type your message..."
-                  className="chat-input"
-                  disabled={isProcessing || isAutoPlaying}
-                />
-                <button 
-                  type="submit" 
-                  className="send-button"
-                  disabled={isProcessing || !message.trim() || isAutoPlaying}
-                >
-                  Send
-                </button>
-                <button 
-                  type="button" 
-                  onClick={handleNext}
-                  className="next-button"
-                  disabled={isProcessing || !currentResponses || nextIndex >= currentResponses.length || isAutoPlaying}
-                >
-                  Next ({currentResponses ? currentResponses.length - nextIndex : 0})
-                </button>
-              </form>
-            </div>
-          </>
-        )}
       </div>
     </div>
   );

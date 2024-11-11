@@ -4,6 +4,14 @@ import GenerateAgents from './GenerateAgents';
 
 const Agents: React.FC = () => {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [isMemoryEnabled, setIsMemoryEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem('memory_enabled');
+    return saved ? JSON.parse(saved) : true;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('memory_enabled', JSON.stringify(isMemoryEnabled));
+  }, [isMemoryEnabled]);
 
   useEffect(() => {
     const savedAgents = localStorage.getItem('agents');
@@ -69,7 +77,19 @@ const Agents: React.FC = () => {
   return (
     <div className="agents-content">
       <div className="agents-header">
-        <h2>Agents</h2>
+        <div className="agents-header-left">
+          <h2>Agents</h2>
+          <div className="memory-toggle">
+            <label className="toggle-label">
+              <input
+                type="checkbox"
+                checked={isMemoryEnabled}
+                onChange={(e) => setIsMemoryEnabled(e.target.checked)}
+              />
+              <span className="toggle-text">Memory {isMemoryEnabled ? 'Enabled' : 'Disabled'}</span>
+            </label>
+          </div>
+        </div>
         <button onClick={addAgent} className="add-agent-button">
           Add Agent
         </button>
@@ -107,28 +127,30 @@ const Agents: React.FC = () => {
               />
             </div>
 
-            <div className="agent-field">
-              <div className="memories-header">
-                <label>Memories ({agent.memories?.length || 0})</label>
-                <button
-                  onClick={() => clearMemories(agent.id)}
-                  className="clear-memories-button"
-                  disabled={!agent.memories?.length}
-                >
-                  Clear Memories
-                </button>
+            {isMemoryEnabled && (
+              <div className="agent-field">
+                <div className="memories-header">
+                  <label>Memories ({agent.memories?.length || 0})</label>
+                  <button
+                    onClick={() => clearMemories(agent.id)}
+                    className="clear-memories-button"
+                    disabled={!agent.memories?.length}
+                  >
+                    Clear Memories
+                  </button>
+                </div>
+                <div className="memories-list">
+                  {agent.memories?.map((memory) => (
+                    <div key={memory.id} className="memory-item">
+                      <p>{memory.content}</p>
+                      <span className="memory-timestamp">
+                        {new Date(memory.timestamp).toLocaleString()}
+                      </span>
+                    </div>
+                  )) || null}
+                </div>
               </div>
-              <div className="memories-list">
-                {agent.memories?.map((memory) => (
-                  <div key={memory.id} className="memory-item">
-                    <p>{memory.content}</p>
-                    <span className="memory-timestamp">
-                      {new Date(memory.timestamp).toLocaleString()}
-                    </span>
-                  </div>
-                )) || null}
-              </div>
-            </div>
+            )}
             
             <div className="agent-field">
               <label>Knowledge Base</label>
